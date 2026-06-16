@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>漏壶系统 - 功能测试套件</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft YaHei", sans-serif;
+    background: #f5f7fa;
+    color: #2c3e50;
+    padding: 20px;
+  }
+  .container { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 24px; margin-bottom: 20px; color: #1a237e; }
+  .summary {
+    background: white;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    display: flex;
+    gap: 30px;
+    flex-wrap: wrap;
+  }
+  .summary-item { text-align: center; flex: 1; min-width: 80px; }
+  .summary-number { font-size: 32px; font-weight: bold; }
+  .summary-label { font-size: 12px; color: #666; margin-top: 4px; }
+  .pass .summary-number { color: #27ae60; }
+  .fail .summary-number { color: #e74c3c; }
+  .pending .summary-number { color: #f39c12; }
+  .total .summary-number { color: #2c3e50; }
+
+  .btn-run {
+    background: #3498db;
+    color: white;
+    border: none;
+    padding: 12px 30px;
+    border-radius: 6px;
+    font-size: 16px;
+    cursor: pointer;
+    margin-bottom: 20px;
+  }
+  .btn-run:hover { background: #2980b9; }
+  .btn-run:disabled { background: #bdc3c7; cursor: not-allowed; }
+
+  .test-suite {
+    background: white;
+    border-radius: 8px;
+    margin-bottom: 15px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    overflow: hidden;
+  }
+  .suite-header {
+    padding: 15px 20px;
+    background: #ecf0f1;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: bold;
+  }
+  .suite-header:hover { background: #dfe6e9; }
+  .suite-badge {
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: normal;
+  }
+  .badge-pass { background: #d4efdf; color: #27ae60; }
+  .badge-fail { background: #fadbd8; color: #e74c3c; }
+  .badge-pending { background: #fdebd0; color: #f39c12; }
+
+  .suite-body { padding: 10px 20px; display: none; }
+  .suite-body.open { display: block; }
+
+  .test-case {
+    padding: 10px 0;
+    border-bottom: 1px solid #ecf0f1;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .test-case:last-child { border-bottom: none; }
+  .test-icon {
+    width: 20px;
+    text-align: center;
+    font-size: 16px;
+  }
+  .icon-pass { color: #27ae60; }
+  .icon-fail { color: #e74c3c; }
+  .icon-pending { color: #f39c12; }
+  .test-name { flex: 1; }
+  .test-duration { font-size: 12px; color: #999; }
+
+  .test-error {
+    background: #fdf0ef;
+    border-left: 3px solid #e74c3c;
+    padding: 8px 12px;
+    margin: 6px 0 6px 32px;
+    font-size: 13px;
+    color: #c0392b;
+    border-radius: 0 4px 4px 0;
+    font-family: Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .api-base {
+    background: #fff;
+    padding: 10px 15px;
+    border-radius: 6px;
+    margin-bottom: 15px;
+    font-size: 13px;
+    color: #666;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .api-base input {
+    flex: 1;
+    padding: 6px 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-family: Consolas, monospace;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  .spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid #3498db;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🧪 漏壶系统功能测试套件</h1>
+
+  <div class="api-base">
+    <span>API 地址：</span>
+    <input type="text" id="apiBase" value="http://localhost:8080/api">
+    <button class="btn-run" id="btnRun" onclick="runAllTests()">▶ 运行全部测试</button>
+  </div>
+
+  <div class="summary">
+    <div class="summary-item total">
+      <div class="summary-number" id="totalCount">0</div>
+      <div class="summary-label">总用例</div>
+    </div>
+    <div class="summary-item pass">
+      <div class="summary-number" id="passCount">0</div>
+      <div class="summary-label">通过</div>
+    </div>
+    <div class="summary-item fail">
+      <div class="summary-number" id="failCount">0</div>
+      <div class="summary-label">失败</div>
+    </div>
+    <div class="summary-item pending">
+      <div class="summary-number" id="pendingCount">0</div>
+      <div class="summary-label">待运行</div>
+    </div>
+  </div>
+
+  <div id="suites"></div>
+</div>
+
+<script src="./js/test_runner.js"></script>
+</body>
+</html>

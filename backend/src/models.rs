@@ -217,6 +217,9 @@ pub struct DynastyClepsydraConfig {
     pub material: String,
     pub configs: Vec<ClepsydraConfig>,
     pub reference_year: i32,
+    pub historical_references: Vec<String>,
+    pub data_source: String,
+    pub uncertainty_percent: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,6 +233,8 @@ pub struct ModernTimepiece {
     pub invention_year: u32,
     pub description: String,
     pub accuracy_class: String,
+    pub standard_reference: String,
+    pub iso_class: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

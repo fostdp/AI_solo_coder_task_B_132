@@ -515,10 +515,14 @@ class VirtualOperatePanel {
                             <span>目标水位</span>
                             <span id="vo-level-val">70.0 cm</span>
                         </div>
-                        <input id="vo-level" type="range" min="5" max="120" value="70" step="0.5"
+                        <input id="vo-level" type="range" min="5" max="120" value="70" step="0.1"
                             style="width:100%;accent-color:#059669;" />
-                        <div style="display:flex;justify-content:space-between;font-size:10px;color:#999;">
-                            <span>5cm(下限)</span><span>62.5cm</span><span>120cm(上限)</span>
+                        <div style="display:flex;justify-content:space-between;gap:4px;margin-top:6px;">
+                            ${[
+                                ['25%','1/4水位'],['50%','1/2水位'],
+                                ['75%','3/4水位'],['100%','满水位']
+                            ].map(([v,l])=>`<button data-level="${v}" class="vo-quick-btn"
+                                style="flex:1;padding:4px;border:1px solid #a7f3d0;background:#ecfdf5;color:#065f46;border-radius:5px;font-size:10px;cursor:pointer;">${l}</button>`).join('')}
                         </div>
                     </div>
                     <div style="margin-bottom:10px;">
@@ -557,17 +561,40 @@ class VirtualOperatePanel {
 
         const levelSlider = document.getElementById('vo-level');
         const levelVal = document.getElementById('vo-level-val');
+        const self = this;
+        this._levelDebounceTimer = null;
+        this._lastSceneUpdate = 0;
+
+        const updateScene3d = () => {
+            if (!this.scene3d || !this.scene3d.clepsydraScene) return;
+            const cid = document.getElementById('vo-clepsydra').value;
+            const cfg = this._clepConfig(cid);
+            if (!cfg) return;
+            const ratio = (parseFloat(levelSlider.value) - cfg.min_level) / (cfg.max_level - cfg.min_level);
+            this.scene3d.clepsydraScene.updateWaterLevel(cid, Math.max(0, Math.min(1, ratio)));
+        };
+
         levelSlider.oninput = () => {
             levelVal.textContent = parseFloat(levelSlider.value).toFixed(1) + ' cm';
-            if (this.scene3d && this.scene3d.clepsydraScene) {
-                const cid = document.getElementById('vo-clepsydra').value;
-                const cfg = this._clepConfig(cid);
-                if (cfg) {
-                    const ratio = (parseFloat(levelSlider.value) - cfg.min_level) / (cfg.max_level - cfg.min_level);
-                    this.scene3d.clepsydraScene.updateWaterLevel(cid, Math.max(0, Math.min(1, ratio)));
-                }
-            }
+            // 16ms节流（约1帧）防抖：避免每像素都触发3D重建
+            if (this._levelDebounceTimer) clearTimeout(this._levelDebounceTimer);
+            this._levelDebounceTimer = setTimeout(() => {
+                this._levelDebounceTimer = null;
+                updateScene3d.call(self);
+            }, 16);
         };
+
+        // 快速跳转预设水位按钮：直接定位 + 立绘更
+        document.querySelectorAll('.vo-quick-btn').forEach(b => {
+            b.onclick = () => {
+                const pct = parseFloat(b.dataset.level) / 100;
+                const min = parseFloat(levelSlider.min);
+                const max = parseFloat(levelSlider.max);
+                levelSlider.value = (min + (max - min) * pct).toFixed(1);
+                levelVal.textContent = parseFloat(levelSlider.value).toFixed(1) + ' cm';
+                updateScene3d.call(self);
+            };
+        });
 
         document.getElementById('btn-vo-run').onclick = () => this._runExperiment();
     }

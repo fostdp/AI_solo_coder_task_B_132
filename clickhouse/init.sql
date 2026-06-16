@@ -365,11 +365,14 @@ CREATE TABLE IF NOT EXISTS dynasty_clepsydra_config (
     material String,
     reference_year Int32,
     stage_configs String COMMENT 'JSON格式的各漏壶配置数组',
+    historical_references String DEFAULT '[]' COMMENT 'JSON字符串数组，史学文献引用',
+    data_source String DEFAULT '史学研究综合整理' COMMENT '数据来源说明',
+    uncertainty_percent Float64 DEFAULT 15.0 COMMENT '日误差数据不确定度(%)',
     created_at DateTime64(3, 'Asia/Shanghai') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(created_at)
 ORDER BY dynasty_id
-COMMENT '各朝代漏壶系统配置参数';
+COMMENT '各朝代漏壶系统配置参数（附文献来源与不确定度）';
 
 INSERT INTO dynasty_clepsydra_config (dynasty_id, dynasty_name, era, clepsydra_type, stage_count, description, historical_daily_error_seconds, typical_water_temp_c, material, reference_year, stage_configs) VALUES
 ('HAN_CHENJIAN', '汉代', '西汉', '沉箭漏（单级浮箭）', 1, '汉代沉箭漏为早期单级漏壶，箭尺随水位下沉指示时间，结构简单但精度较低。', 900.0, 15.0, '青铜', -100, '[{"clepsydra_id":"HAN01","name":"沉箭壶","max_level":80.0,"min_level":5.0,"standard_flow":1.8,"cross_section_area":113.1,"orifice_diameter":0.25,"flow_coefficient":0.58}]'),
@@ -393,11 +396,13 @@ CREATE TABLE IF NOT EXISTS modern_timepiece_config (
     invention_year UInt32,
     description String,
     accuracy_class String,
+    standard_reference String DEFAULT '' COMMENT '标准文献引用',
+    iso_class Nullable(String) DEFAULT NULL COMMENT 'ISO精度等级',
     created_at DateTime64(3, 'Asia/Shanghai') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(created_at)
 ORDER BY piece_id
-COMMENT '现代计时器精度参数（用于跨时代对比）';
+COMMENT '现代计时器精度参数（用于跨时代对比，附国际标准来源）';
 
 INSERT INTO modern_timepiece_config (piece_id, name, category, daily_error_seconds, yearly_error_seconds, technology, invention_year, description, accuracy_class) VALUES
 ('MECH_WATCH', '机械手表', '机械', 10.0, 3650.0, '摆轮游丝', 1675, '传统机械手表，日误差±10秒属天文台级别。', '中等'),

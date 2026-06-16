@@ -333,55 +333,13 @@ fn modern_color(category: &str) -> &'static str {
     }
 }
 
-// ============================================================
-// 多级串联误差传递 — 参数表驱动降阶模型
-// ------------------------------------------------------------
-// 降阶策略：
-//   1. 参数表替代硬编码if/else（可维护性↑，圈复杂度↓）
-//   2. 半经验近似替代完整水力仿真（精度±10%内，性能↑）
-//   3. 放大系数采用 log 分布而非线性（更贴合物理直觉）
-// ============================================================
-
-const INHERENT_ERROR_TABLE: [[f64; 4]; 4] = [
-    // idx=0   1      2      3
-    [2.50,  0.00,  0.00,  0.00], // N=1
-    [0.80,  0.50,  0.00,  0.00], // N=2
-    [0.35,  0.25,  0.18,  0.00], // N=3
-    [0.18,  0.12,  0.08,  0.05], // N=4
-];
-
-fn inherent_error_pct(stages: u32, idx: u32) -> f64 {
-    let n = stages.clamp(1, 4) as usize - 1;
-    let i = idx as usize;
-    if i < 4 { INHERENT_ERROR_TABLE[n][i] } else { 0.05 }
-}
-
-fn amp_factor(stages: u32, idx: u32) -> f64 {
-    if stages <= 1 { return 1.0; }
-    let n = stages as f64;
-    let i = idx as f64;
-    1.0 + ((n - 1.0 - i) / (n - 1.0)) * 0.45
-}
-
-fn stage_self_error(
-    base_daily_err: f64,
-    inherent_pct: f64,
-    avg_level: f64,
-    stages: u32,
-) -> f64 {
-    let level_factor = if avg_level < 30.0 { 1.3 }
-        else if avg_level > 70.0 { 0.9 }
-        else { 1.0 };
-    base_daily_err * (inherent_pct / 100.0) * level_factor
-        / (stages as f64).sqrt().max(1.0)
-}
-
 pub struct AnalysisService {
     pub config: Arc<AppConfig>,
     pub store: Arc<ClickHouseStore>,
     pub hydraulic: Arc<HydraulicModel>,
     pub dynasties: Mutex<HashMap<String, DynastyClepsydraConfig>>,
     pub modern_pieces: Mutex<HashMap<String, ModernTimepiece>>,
+    pub compute_pool: Arc<crate::hydraulic_compute_pool::HydraulicComputePool>,
 }
 
 impl AnalysisService {
@@ -398,10 +356,14 @@ impl AnalysisService {
         for m in default_modern_timepieces() {
             mod_map.insert(m.piece_id.clone(), m);
         }
+        let compute_pool = Arc::new(crate::hydraulic_compute_pool::HydraulicComputePool::new(
+            config.clone(), hydraulic.clone(),
+        ));
         Self {
             config, store, hydraulic,
             dynasties: Mutex::new(dyn_map),
             modern_pieces: Mutex::new(mod_map),
+            compute_pool,
         }
     }
 
@@ -425,46 +387,8 @@ impl AnalysisService {
         map.get(id).cloned()
     }
 
-    fn calc_dynasty_daily_error(&self, dynasty: &DynastyClepsydraConfig) -> f64 {
-        let temp = dynasty.typical_water_temp_c;
-        let humidity = 60.0;
-        let quality = 1.0;
-        let pressure = self.hydraulic.altitude_to_pressure(self.config.hydraulic.altitude_m);
-
-        let mut cumulative_error = 0.0;
-        let _dt = 1.0;
-        let seconds_per_day = 86400.0;
-
-        for cfg in &dynasty.configs {
-            let level_range = cfg.max_level - cfg.min_level;
-            let avg_level = cfg.min_level + level_range * 0.7;
-
-            let theoretical = self.hydraulic.calculate_theoretical_flow(
-                avg_level, cfg, temp,
-            );
-
-            let level_drop_ratio = if dynasty.stage_count <= 1 {
-                0.25
-            } else if dynasty.stage_count == 2 {
-                0.10
-            } else if dynasty.stage_count == 3 {
-                0.035
-            } else {
-                0.018
-            };
-
-            let actual_flow_deviation = theoretical * level_drop_ratio;
-            let evap = self.hydraulic.calculate_evaporation_rate(
-                temp, humidity, cfg.cross_section_area, quality, pressure,
-            );
-
-            let effective_error_rate = (actual_flow_deviation + evap) / theoretical * 100.0;
-            let stage_error = effective_error_rate / 100.0 * seconds_per_day;
-            cumulative_error += stage_error / (dynasty.stage_count as f64).sqrt();
-        }
-
-        let base_historical = dynasty.historical_daily_error_seconds;
-        (base_historical + cumulative_error) / 2.0
+    pub fn calc_dynasty_daily_error(&self, dynasty: &DynastyClepsydraConfig) -> f64 {
+        self.compute_pool.comparator.calc_dynasty_daily_error(dynasty)
     }
 
     pub fn compare_dynasties(&self, left_id: &str, right_id: &str) -> Result<DynastyComparison> {
@@ -472,363 +396,24 @@ impl AnalysisService {
             .with_context(|| format!("未找到朝代漏壶: {}", left_id))?;
         let right = self.get_dynasty(right_id)
             .with_context(|| format!("未找到朝代漏壶: {}", right_id))?;
-
-        let left_error = self.calc_dynasty_daily_error(&left);
-        let right_error = self.calc_dynasty_daily_error(&right);
-
-        let error_ratio = if right_error.abs() > 1e-9 {
-            left_error / right_error
-        } else {
-            1.0
-        };
-
-        let winner = if left_error < right_error {
-            left.dynasty_name.clone()
-        } else {
-            right.dynasty_name.clone()
-        };
-
-        let mut key_diff = Vec::new();
-        if left.stage_count != right.stage_count {
-            key_diff.push(format!(
-                "级数差异：{}{}级 vs {}{}级",
-                left.dynasty_name, left.stage_count,
-                right.dynasty_name, right.stage_count
-            ));
-        }
-        key_diff.push(format!(
-            "材质差异：{} vs {}",
-            left.material, right.material
-        ));
-        key_diff.push(format!(
-            "典型水温：{:.0}°C vs {:.0}°C",
-            left.typical_water_temp_c, right.typical_water_temp_c
-        ));
-        if left_error < right_error {
-            key_diff.push(format!(
-                "精度提升：{}比{}精确{:.1}倍",
-                right.dynasty_name, left.dynasty_name, error_ratio
-            ));
-        } else {
-            key_diff.push(format!(
-                "精度提升：{}比{}精确{:.1}倍",
-                left.dynasty_name, right.dynasty_name, 1.0 / error_ratio
-            ));
-        }
-
-        let flow_comparison: Vec<FlowComparisonPoint> = (0..left.configs.len().max(right.configs.len()))
-            .map(|i| {
-                let left_cfg = left.configs.get(i);
-                let right_cfg = right.configs.get(i);
-                FlowComparisonPoint {
-                    stage: format!("第{}级", i + 1),
-                    left_flow_mlps: left_cfg.map(|c| c.standard_flow).unwrap_or(0.0),
-                    right_flow_mlps: right_cfg.map(|c| c.standard_flow).unwrap_or(0.0),
-                    left_level_cm: left_cfg.map(|c| (c.max_level + c.min_level) / 2.0).unwrap_or(0.0),
-                    right_level_cm: right_cfg.map(|c| (c.max_level + c.min_level) / 2.0).unwrap_or(0.0),
-                }
-            })
-            .collect();
-
-        Ok(DynastyComparison {
-            left_dynasty: left,
-            right_dynasty: right,
-            left_daily_error_seconds: left_error,
-            right_daily_error_seconds: right_error,
-            error_ratio,
-            winner,
-            key_differences: key_diff,
-            flow_comparison,
-        })
+        self.compute_pool.comparator.compare_dynasties(&left, &right)
     }
 
     pub fn analyze_error_transfer(&self, dynasty_id: &str) -> Result<ErrorTransferAnalysis> {
         let dynasty = self.get_dynasty(dynasty_id)
             .with_context(|| format!("未找到朝代漏壶: {}", dynasty_id))?;
-
-        let base_err = dynasty.historical_daily_error_seconds;
-        let stages = dynasty.stage_count;
-        let temp = dynasty.typical_water_temp_c;
-
-        let mut nodes = Vec::new();
-        let mut cumulative_input_error = 0.0;
-        let mut total_self_error = 0.0;
-
-        for (i, cfg) in dynasty.configs.iter().enumerate() {
-            let idx = i as u32;
-            let avg_level = cfg.min_level + (cfg.max_level - cfg.min_level) * 0.7;
-
-            let self_err = stage_self_error(
-                base_err,
-                inherent_error_pct(stages, idx),
-                avg_level,
-                stages,
-            );
-
-            let amp = amp_factor(stages, idx);
-            let output_error = (cumulative_input_error + self_err) * amp;
-
-            nodes.push(ErrorTransferNode {
-                stage_index: idx,
-                clepsydra_id: cfg.clepsydra_id.clone(),
-                input_error_seconds: cumulative_input_error,
-                self_error_seconds: self_err,
-                output_error_seconds: output_error,
-                amplification_factor: amp,
-                contribution_percent: 0.0,
-                water_level_cm: avg_level,
-                flow_rate_mlps: cfg.standard_flow,
-            });
-
-            cumulative_input_error = output_error;
-            total_self_error += self_err;
-        }
-
-        let total_error = cumulative_input_error;
-        for node in nodes.iter_mut() {
-            node.contribution_percent = if total_self_error > 1e-9 {
-                node.self_error_seconds / total_self_error * 100.0
-            } else {
-                0.0
-            };
-        }
-
-        let (bottleneck_idx, bottleneck_reason) = nodes.iter()
-            .enumerate()
-            .max_by(|a, b| a.1.self_error_seconds.partial_cmp(&b.1.self_error_seconds).unwrap())
-            .map(|(i, n)| {
-                let reason = if n.water_level_cm < 30.0 {
-                    format!("第{}级{}水位偏低，水头不足导致流量稳定性差", i + 1, n.clepsydra_id)
-                } else if n.amplification_factor > 1.3 {
-                    format!("第{}级{}误差放大系数过高（{:.2}x），需增加缓冲壶", i + 1, n.clepsydra_id, n.amplification_factor)
-                } else {
-                    format!("第{}级{}自身固有误差最大（{:.2}s/日），建议优化孔口设计", i + 1, n.clepsydra_id, n.self_error_seconds)
-                };
-                (i as u32, reason)
-            })
-            .unwrap_or((0, "未知".to_string()));
-
-        let mut recommendations = Vec::new();
-        if stages < 4 {
-            recommendations.push(format!(
-                "建议增加补偿壶级数至4级，可将误差再降低约{:.0}%",
-                (4.0 - stages as f64) * 15.0
-            ));
-        }
-        recommendations.push(format!(
-            "重点优化瓶颈级{}：采用漫流恒水位可减小误差约{:.0}%",
-            nodes.get(bottleneck_idx as usize).map(|n| n.clepsydra_id.clone()).unwrap_or_default(),
-            nodes.get(bottleneck_idx as usize).map(|n| n.contribution_percent * 0.6).unwrap_or(25.0)
-        ));
-        recommendations.push("恒温装置：将水温控制在±1°C范围内，可减少粘性引起的约8%误差".to_string());
-        if temp < 18.0 {
-            recommendations.push("当前典型水温偏低，建议将环境温度维持在20°C左右以优化流量系数".to_string());
-        }
-
-        let compensation_potential = total_error * 0.35;
-
-        Ok(ErrorTransferAnalysis {
-            total_error_seconds: total_error,
-            nodes,
-            bottleneck_stage: bottleneck_idx,
-            bottleneck_reason,
-            recommendations,
-            compensation_potential_seconds: compensation_potential,
-        })
+        self.compute_pool.analyzer.analyze(&dynasty)
     }
 
     pub fn cross_era_comparison(&self) -> Result<CrossEraComparison> {
         let dynasties = self.get_all_dynasties();
         let pieces = self.get_all_modern();
-
-        let ancient_devices: Vec<_> = dynasties.iter().map(|d| {
-            let err = self.calc_dynasty_daily_error(d);
-            crate::models::AccuracyComparisonPoint {
-                label: format!("{}·{}", d.dynasty_name, d.clepsydra_type.split('（').next().unwrap_or("")),
-                category: d.clepsydra_type.clone(),
-                daily_error_seconds: err,
-                yearly_error_minutes: err * 365.0 / 60.0,
-                color_hex: dynasty_color(&d.dynasty_id).to_string(),
-                era: "古代".to_string(),
-            }
-        }).collect();
-
-        let modern_devices: Vec<_> = pieces.iter().map(|m| {
-            crate::models::AccuracyComparisonPoint {
-                label: m.name.clone(),
-                category: m.category.clone(),
-                daily_error_seconds: m.daily_error_seconds,
-                yearly_error_minutes: m.yearly_error_seconds / 60.0,
-                color_hex: modern_color(&m.category).to_string(),
-                era: "现代".to_string(),
-            }
-        }).collect();
-
-        let best_ancient = ancient_devices.iter()
-            .min_by(|a, b| a.daily_error_seconds.partial_cmp(&b.daily_error_seconds).unwrap())
-            .cloned()
-            .unwrap_or_else(|| ancient_devices[0].clone());
-
-        let best_modern = modern_devices.iter()
-            .min_by(|a, b| a.daily_error_seconds.partial_cmp(&b.daily_error_seconds).unwrap())
-            .cloned()
-            .unwrap_or_else(|| modern_devices[0].clone());
-
-        let improvement_factor = if best_modern.daily_error_seconds > 1e-9 {
-            best_ancient.daily_error_seconds / best_modern.daily_error_seconds
-        } else {
-            1e9
-        };
-
-        let timeline_data = vec![
-            TimelineAccuracy { year: -100, label: "西汉沉箭漏".into(), daily_error_seconds: 900.0, category: "古代".into() },
-            TimelineAccuracy { year: 125, label: "东汉浮箭漏".into(), daily_error_seconds: 300.0, category: "古代".into() },
-            TimelineAccuracy { year: 650, label: "唐吕才漏".into(), daily_error_seconds: 120.0, category: "古代".into() },
-            TimelineAccuracy { year: 1030, label: "宋莲花漏".into(), daily_error_seconds: 45.0, category: "古代".into() },
-            TimelineAccuracy { year: 1088, label: "水运仪象台".into(), daily_error_seconds: 50.0, category: "古代".into() },
-            TimelineAccuracy { year: 1420, label: "明永乐漏".into(), daily_error_seconds: 65.0, category: "古代".into() },
-            TimelineAccuracy { year: 1656, label: "惠更斯摆钟".into(), daily_error_seconds: 60.0, category: "近代".into() },
-            TimelineAccuracy { year: 1730, label: "精密摆钟".into(), daily_error_seconds: 0.2, category: "近代".into() },
-            TimelineAccuracy { year: 1870, label: "精密机械表".into(), daily_error_seconds: 10.0, category: "近代".into() },
-            TimelineAccuracy { year: 1920, label: "天文台机械表".into(), daily_error_seconds: 2.0, category: "现代".into() },
-            TimelineAccuracy { year: 1955, label: "铯原子钟".into(), daily_error_seconds: 1e-6, category: "现代".into() },
-            TimelineAccuracy { year: 1969, label: "石英手表".into(), daily_error_seconds: 0.5, category: "现代".into() },
-            TimelineAccuracy { year: 1978, label: "GPS授时".into(), daily_error_seconds: 1e-5, category: "现代".into() },
-        ];
-
-        Ok(CrossEraComparison {
-            ancient_devices,
-            modern_devices,
-            best_ancient,
-            best_modern,
-            improvement_factor,
-            timeline_data,
-        })
+        let comp = Arc::clone(&self.compute_pool.comparator);
+        self.compute_pool.chronometry.cross_era_comparison(&dynasties, &pieces, |d| comp.calc_dynasty_daily_error(d))
     }
 
     pub fn virtual_operate(&self, req: VirtualOperationRequest) -> Result<VirtualOperationResult> {
-        let configs = self.config.to_clepsydra_map();
-        let cfg = configs.get(&req.clepsydra_id)
-            .with_context(|| format!("未找到漏壶配置: {}", req.clepsydra_id))?;
-
-        let target_level = req.target_water_level_cm.clamp(cfg.min_level, cfg.max_level);
-        let water_temp = req.water_temp_c.unwrap_or(20.0).clamp(0.0, 50.0);
-        let sim_secs = req.simulate_seconds.max(10).min(86400);
-        let dt = 1.0f64;
-        let steps = sim_secs as usize;
-        let sample_interval = (steps / 50).max(1);
-
-        let mut level = (cfg.min_level + cfg.max_level) / 2.0;
-        let initial_level = level;
-        let pressure = 101.325;
-        let humidity = 60.0;
-        let quality = 1.0;
-
-        let theoretical = self.hydraulic.calculate_theoretical_flow(level, cfg, water_temp);
-        let initial_error_rate = 0.0;
-
-        let mut level_history = Vec::new();
-        let mut error_history = Vec::new();
-        let mut flow_history = Vec::new();
-        let mut cumulative_error = initial_error_rate;
-
-        level_history.push((0.0, level));
-        error_history.push((0.0, cumulative_error));
-        flow_history.push((0.0, theoretical));
-
-        for step in 0..steps {
-            let t = step as f64 + dt;
-
-            let remaining = (target_level - level).abs();
-            if remaining > 0.05 {
-                // 自适应步长：远距离快调（比例+最小步长），近距离精调
-                // change = sign * min(remaining, 0.2 + 0.08*remaining)
-                // 例: remaining=50cm → step=4.2cm;  remaining=10cm → step=1.0cm;  remaining=1cm → step=0.28cm
-                let adaptive_step = 0.2 + 0.08 * remaining;
-                let change = (target_level - level).signum() * remaining.min(adaptive_step);
-                level += change;
-            }
-
-            level = level.clamp(cfg.min_level, cfg.max_level);
-
-            let current_theoretical = self.hydraulic.calculate_theoretical_flow(level, cfg, water_temp);
-            let evap = self.hydraulic.calculate_evaporation_rate(
-                water_temp, humidity, cfg.cross_section_area, quality, pressure,
-            );
-
-            let level_drop_per_sec = if level > cfg.max_level * 0.9 {
-                0.002
-            } else if level > cfg.max_level * 0.7 {
-                0.0008
-            } else if level > cfg.max_level * 0.5 {
-                0.0003
-            } else {
-                0.001
-            };
-
-            let actual_flow = current_theoretical * (1.0 - level_drop_per_sec * 100.0 / current_theoretical.max(0.01));
-            let error_pct = self.hydraulic.calculate_flow_error(current_theoretical, actual_flow - evap);
-            cumulative_error = self.hydraulic.update_daily_error(cumulative_error, error_pct, dt);
-
-            if step % sample_interval == 0 || step == steps - 1 {
-                level_history.push((t, level));
-                error_history.push((t, cumulative_error));
-                flow_history.push((t, actual_flow.max(0.0)));
-            }
-        }
-
-        let mut observations = Vec::new();
-        let level_change_pct = (level - initial_level) / (cfg.max_level - cfg.min_level) * 100.0;
-        if level_change_pct > 5.0 {
-            observations.push(format!(
-                "水位升高{:.1}%，水头增加，理论流量上升约{:.2}%",
-                level_change_pct,
-                ((level / initial_level).sqrt() - 1.0) * 100.0
-            ));
-        } else if level_change_pct < -5.0 {
-            observations.push(format!(
-                "水位降低{:.1}%，水头减小，理论流量下降约{:.2}%",
-                -level_change_pct,
-                (1.0 - (level / initial_level.max(0.01)).sqrt()) * 100.0
-            ));
-        }
-
-        let error_change = cumulative_error - initial_error_rate;
-        if error_change.abs() > 1.0 {
-            observations.push(format!(
-                "模拟{}秒后，计时误差{}{:.2}秒",
-                sim_secs,
-                if error_change > 0.0 { "累计增加" } else { "累计减少" },
-                error_change.abs()
-            ));
-        }
-
-        if target_level < cfg.min_level + (cfg.max_level - cfg.min_level) * 0.2 {
-            observations.push("警告：目标水位过低，水头不足将导致流量快速衰减，误差增大".to_string());
-        }
-        if target_level > cfg.max_level * 0.95 {
-            observations.push("提示：水位接近上限，处于恒流区最佳工作状态，精度最优".to_string());
-        }
-        if (water_temp - 20.0).abs() > 10.0 {
-            observations.push(format!(
-                "水温偏离20°C基准{:+.1}°C，粘性变化已引入约{:.1}%的流量偏差",
-                water_temp - 20.0,
-                (water_temp - 20.0).abs() * 0.01 * 100.0
-            ));
-        }
-
-        Ok(VirtualOperationResult {
-            clepsydra_id: req.clepsydra_id.clone(),
-            initial_level_cm: initial_level,
-            final_level_cm: level,
-            initial_error_seconds: initial_error_rate,
-            final_error_seconds: cumulative_error,
-            time_elapsed_simulated: sim_secs,
-            level_history,
-            error_history,
-            flow_history,
-            observations,
-        })
+        self.compute_pool.vr_engine.run_virtual_operation(&req)
     }
 }
 
@@ -862,6 +447,7 @@ mod tests {
                 standard_pressure_kpa: 101.325,
                 min_dt_seconds: 0.1,
                 altitude_m: 50.0,
+                default_temp_c: 20.0,
             },
             pid: PidConfig {
                 base_kp: 0.5,

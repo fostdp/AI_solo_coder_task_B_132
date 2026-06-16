@@ -11,6 +11,11 @@ mod error_compensator;
 mod alarm_ws;
 mod metrics;
 mod analysis_service;
+mod era_precision_comparator;
+mod chronometry_comparator;
+mod cascade_error_analyzer;
+mod vr_clepsydra;
+mod hydraulic_compute_pool;
 
 use std::collections::HashMap;
 use std::sync::Arc;

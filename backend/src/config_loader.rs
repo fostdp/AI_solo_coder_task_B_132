@@ -15,6 +15,42 @@ pub struct AppConfig {
     pub channels: ChannelConfig,
 }
 
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            mqtt: MqttConfig::default(),
+            clickhouse: ClickHouseConfig::default(),
+            server: ServerConfig::default(),
+            hydraulic: HydraulicConfig::default(),
+            pid: PidConfig::default(),
+            alerts: AlertConfig::default(),
+            clepsydras: vec![
+                ClepsydraEntry {
+                    clepsydra_id: "KD1".into(), name: "天上壶".into(),
+                    max_level_cm: 120.0, min_level_cm: 20.0, standard_flow_ml_s: 2.5,
+                    cross_section_cm2: 78.54, orifice_diameter_cm: 0.3, flow_coefficient: 0.62,
+                },
+                ClepsydraEntry {
+                    clepsydra_id: "KD2".into(), name: "夜漏壶".into(),
+                    max_level_cm: 100.0, min_level_cm: 15.0, standard_flow_ml_s: 2.5,
+                    cross_section_cm2: 78.54, orifice_diameter_cm: 0.3, flow_coefficient: 0.62,
+                },
+                ClepsydraEntry {
+                    clepsydra_id: "KD3".into(), name: "平水壶".into(),
+                    max_level_cm: 80.0, min_level_cm: 10.0, standard_flow_ml_s: 2.5,
+                    cross_section_cm2: 78.54, orifice_diameter_cm: 0.3, flow_coefficient: 0.62,
+                },
+                ClepsydraEntry {
+                    clepsydra_id: "KD4".into(), name: "万分水".into(),
+                    max_level_cm: 60.0, min_level_cm: 5.0, standard_flow_ml_s: 2.5,
+                    cross_section_cm2: 78.54, orifice_diameter_cm: 0.3, flow_coefficient: 0.62,
+                },
+            ],
+            channels: ChannelConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MqttConfig {
     pub broker: String,
@@ -22,6 +58,18 @@ pub struct MqttConfig {
     pub topic: String,
     pub client_id_prefix: String,
     pub keep_alive_secs: u64,
+}
+
+impl Default for MqttConfig {
+    fn default() -> Self {
+        Self {
+            broker: "localhost".into(),
+            port: 1883,
+            topic: "clepsydra/sensor/+".into(),
+            client_id_prefix: "clepsydra-backend".into(),
+            keep_alive_secs: 30,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,10 +80,27 @@ pub struct ClickHouseConfig {
     pub flush_interval_ms: u64,
 }
 
+impl Default for ClickHouseConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://localhost:8123".into(),
+            database: "clepsydra".into(),
+            batch_size: 100,
+            flush_interval_ms: 1000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub port: u16,
     pub cors_origins: Vec<String>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self { port: 8080, cors_origins: vec!["*".into()] }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +109,20 @@ pub struct HydraulicConfig {
     pub standard_pressure_kpa: f64,
     pub min_dt_seconds: f64,
     pub altitude_m: f64,
+    #[serde(default)]
+    pub default_temp_c: f64,
+}
+
+impl Default for HydraulicConfig {
+    fn default() -> Self {
+        Self {
+            gravity_cm_s2: 980.665,
+            standard_pressure_kpa: 101.325,
+            min_dt_seconds: 1.0,
+            altitude_m: 50.0,
+            default_temp_c: 20.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,12 +139,37 @@ pub struct PidConfig {
     pub history_window: usize,
 }
 
+impl Default for PidConfig {
+    fn default() -> Self {
+        Self {
+            base_kp: 0.5, base_ki: 0.05, base_kd: 0.1,
+            kf_feedforward: 0.08,
+            output_min_ml_s: -1.5, output_max_ml_s: 1.5,
+            output_rate_limit_ml_s2: 0.3,
+            integral_limit: 50.0,
+            temp_coefficient_per_deg: 0.01,
+            history_window: 5,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertConfig {
     pub daily_error_threshold_seconds: f64,
     pub critical_error_multiplier: f64,
     pub water_temp_min_c: f64,
     pub water_temp_max_c: f64,
+}
+
+impl Default for AlertConfig {
+    fn default() -> Self {
+        Self {
+            daily_error_threshold_seconds: 60.0,
+            critical_error_multiplier: 2.0,
+            water_temp_min_c: 0.0,
+            water_temp_max_c: 50.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +190,17 @@ pub struct ChannelConfig {
     pub simulator_to_compensator_buffer: usize,
     pub compensator_to_alarm_buffer: usize,
     pub alarm_broadcast_capacity: usize,
+}
+
+impl Default for ChannelConfig {
+    fn default() -> Self {
+        Self {
+            dtu_to_simulator_buffer: 1000,
+            simulator_to_compensator_buffer: 500,
+            compensator_to_alarm_buffer: 500,
+            alarm_broadcast_capacity: 1000,
+        }
+    }
 }
 
 impl AppConfig {

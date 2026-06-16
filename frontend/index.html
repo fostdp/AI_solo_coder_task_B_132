@@ -499,10 +499,7 @@
         });
 
         const apiBase = window.location.origin;
-        window._dynastyComparePanel = new DynastyComparePanel('dynasty-compare-panel', apiBase);
-        window._crossEraPanel = new CrossEraComparePanel('cross-era-panel', apiBase);
-        window._etPanel = new ErrorTransferPanel('error-transfer-panel', apiBase);
-        window._voPanel = new VirtualOperatePanel('virtual-operate-panel', apiBase, scene3d);
+        loadFeaturePanels(apiBase, scene3d);
 
         document.getElementById('btnRotate').addEventListener('click', function () {
             scene3d.setAutoRotate(!scene3d.autoRotate);
